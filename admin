@@ -1,0 +1,222 @@
+
+import asyncio
+import os
+import aiosqlite
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+DB_NAME = "domovoy.db"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+
+class Booking(StatesGroup):
+    name = State()
+    dates = State()
+    guests = State()
+    phone = State()
+
+
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏡 Наши домики", callback_data="houses")],
+        [InlineKeyboardButton(text="💰 Цены и условия", callback_data="prices")],
+        [InlineKeyboardButton(text="📅 Забронировать", callback_data="booking")],
+        [InlineKeyboardButton(text="🗝 Инструкция по заселению", callback_data="checkin")],
+        [InlineKeyboardButton(text="👨‍💼 Связаться с администратором", callback_data="admin")]
+    ])
+
+
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bookings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                name TEXT,
+                dates TEXT,
+                guests TEXT,
+                phone TEXT
+            )
+        """)
+        await db.commit()
+
+
+@dp.message(CommandStart())
+async def start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Здравствуйте! 👋\n\n"
+        "Я Домовой — виртуальный администратор нашей базы отдыха.\n"
+        "Помогу выбрать домик, оставить заявку на бронирование "
+        "и разобраться с заселением.\n\n"
+        "Чем могу помочь?",
+        reply_markup=main_menu()
+    )
+
+
+@dp.message(Command("myid"))
+async def my_id(message: Message):
+    await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
+
+
+@dp.callback_query(F.data == "houses")
+async def houses(callback: CallbackQuery):
+    await callback.message.answer(
+        "🏡 Добро пожаловать в нашу базу отдыха!\n\n"
+        "Информация о домиках и их оснащении сейчас уточняется. "
+        "Напишите администратору, и он поможет подобрать вариант.",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "prices")
+async def prices(callback: CallbackQuery):
+    await callback.message.answer(
+        "💰 Стоимость зависит от домика, даты и количества гостей.\n\n"
+        "Оставьте заявку на бронирование, и администратор "
+        "уточнит актуальную стоимость.",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "checkin")
+async def checkin(callback: CallbackQuery):
+    await callback.message.answer(
+        "🗝 Инструкции по заселению отправляются после "
+        "подтверждения бронирования.\n\n"
+        "Администратор сообщит вам адрес, время заезда "
+        "и порядок получения доступа к домику.",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin")
+async def contact_admin(callback: CallbackQuery):
+    await callback.message.answer(
+        "👨‍💼 Чтобы связаться с администратором, "
+        "оставьте сообщение здесь. Мы передадим его ответственному сотруднику."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "booking")
+async def booking_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(Booking.name)
+    await callback.message.answer(
+        "📅 Отлично! Давайте оформим заявку.\n\n"
+        "Как вас зовут?"
+    )
+    await callback.answer()
+
+
+@dp.message(Booking.name)
+async def booking_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(Booking.dates)
+    await message.answer(
+        "Приятно познакомиться!\n\n"
+        "На какие даты планируете отдых? "
+        "Например: с 10 по 12 декабря."
+    )
+
+
+@dp.message(Booking.dates)
+async def booking_dates(message: Message, state: FSMContext):
+    await state.update_data(dates=message.text)
+    await state.set_state(Booking.guests)
+    await message.answer("Сколько человек планирует приехать?")
+
+
+@dp.message(Booking.guests)
+async def booking_guests(message: Message, state: FSMContext):
+    await state.update_data(guests=message.text)
+    await state.set_state(Booking.phone)
+    await message.answer(
+        "Оставьте, пожалуйста, номер телефона для связи."
+    )
+
+
+@dp.message(Booking.phone)
+async def booking_phone(message: Message, state: FSMContext):
+    data = await state.get_data()
+
+    booking_data = {
+        "name": data["name"],
+        "dates": data["dates"],
+        "guests": data["guests"],
+        "phone": message.text
+    }
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            """
+            INSERT INTO bookings
+            (telegram_id, name, dates, guests, phone)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                message.from_user.id,
+                booking_data["name"],
+                booking_data["dates"],
+                booking_data["guests"],
+                booking_data["phone"]
+            )
+        )
+        await db.commit()
+
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                int(ADMIN_ID),
+                "🔔 НОВАЯ ЗАЯВКА НА БРОНИРОВАНИЕ\n\n"
+                f"Имя: {booking_data['name']}\n"
+                f"Даты: {booking_data['dates']}\n"
+                f"Гости: {booking_data['guests']}\n"
+                f"Телефон: {booking_data['phone']}\n"
+                f"Telegram ID: {message.from_user.id}\n\n"
+                "Проверьте свободные даты и свяжитесь с гостем."
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Заявка сохранена, но уведомление администратору "
+                "не отправилось. Пожалуйста, сообщите администратору."
+            )
+
+    await state.clear()
+    await message.answer(
+        "✅ Ваша заявка принята!\n\n"
+        "Администратор проверит доступность домика "
+        "и свяжется с вами для подтверждения.\n\n"
+        "Обратите внимание: это пока не подтверждённая бронь.",
+        reply_markup=main_menu()
+    )
+
+
+async def main():
+    await init_db()
+    print("Домовой запущен!")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
